@@ -19,10 +19,9 @@ function test()
   enterFunc ('test');
   printBugNumber(BUGNUMBER);
   printStatus (summary);
- 
-  expect = 'SyntaxError: invalid for/in left-hand side';
 
-  jit(true);
+  expect = 'TypeError: invalid assignment to const `b\'';
+
 
   try
   {
@@ -33,7 +32,6 @@ function test()
     actual = ex + '';
   }
 
-  jit(false);
 
   reportCompare(expect, actual, summary);
 

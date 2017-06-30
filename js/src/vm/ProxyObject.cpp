@@ -7,24 +7,22 @@
 #include "vm/ProxyObject.h"
 
 #include "jscompartment.h"
-#include "jsgcinlines.h"
-#include "jsinferinlines.h"
 #include "jsobjinlines.h"
 
 using namespace js;
 
-/* static */ ProxyObject *
-ProxyObject::New(JSContext *cx, const BaseProxyHandler *handler, HandleValue priv, TaggedProto proto_,
-                 JSObject *parent_, const ProxyOptions &options)
+/* static */ ProxyObject*
+ProxyObject::New(JSContext* cx, const BaseProxyHandler* handler, HandleValue priv, TaggedProto proto_,
+                 const ProxyOptions& options)
 {
     Rooted<TaggedProto> proto(cx, proto_);
-    RootedObject parent(cx, parent_);
 
-    const Class *clasp = options.clasp();
+    const Class* clasp = options.clasp();
 
-    JS_ASSERT(isValidProxyClass(clasp));
-    JS_ASSERT_IF(proto.isObject(), cx->compartment() == proto.toObject()->compartment());
-    JS_ASSERT_IF(parent, cx->compartment() == parent->compartment());
+    MOZ_ASSERT(isValidProxyClass(clasp));
+    MOZ_ASSERT(clasp->shouldDelayMetadataBuilder());
+    MOZ_ASSERT_IF(proto.isObject(), cx->compartment() == proto.toObject()->compartment());
+    MOZ_ASSERT(clasp->hasFinalize());
 
     /*
      * Eagerly mark properties unknown for proxies, so we don't try to track
@@ -35,63 +33,99 @@ ProxyObject::New(JSContext *cx, const BaseProxyHandler *handler, HandleValue pri
      */
     if (proto.isObject() && !options.singleton() && !clasp->isDOMClass()) {
         RootedObject protoObj(cx, proto.toObject());
-        if (!JSObject::setNewTypeUnknown(cx, clasp, protoObj))
+        if (!JSObject::setNewGroupUnknown(cx, clasp, protoObj))
             return nullptr;
     }
 
-    NewObjectKind newKind = options.singleton() ? SingletonObject : GenericObject;
-    gc::AllocKind allocKind = gc::GetGCObjectKind(clasp);
+    // Ensure that the wrapper has the same lifetime assumptions as the
+    // wrappee. Prefer to allocate in the nursery, when possible.
+    NewObjectKind newKind = NurseryAllocatedProxy;
+    if (options.singleton()) {
+        MOZ_ASSERT(priv.isGCThing() && priv.toGCThing()->isTenured());
+        newKind = SingletonObject;
+    } else if ((priv.isGCThing() && priv.toGCThing()->isTenured()) ||
+               !handler->canNurseryAllocate() ||
+               !handler->finalizeInBackground(priv))
+    {
+        newKind = TenuredObject;
+    }
 
+    gc::AllocKind allocKind = gc::GetGCObjectKind(clasp);
     if (handler->finalizeInBackground(priv))
         allocKind = GetBackgroundAllocKind(allocKind);
 
-    RootedObject obj(cx, NewObjectWithGivenProto(cx, clasp, proto, parent, allocKind, newKind));
+    AutoSetNewObjectMetadata metadata(cx);
+    // Note: this will initialize the object's |data| to strange values, but we
+    // will immediately overwrite those below.
+    RootedObject obj(cx, NewObjectWithGivenTaggedProto(cx, clasp, proto, allocKind,
+                                                       newKind));
     if (!obj)
         return nullptr;
 
     Rooted<ProxyObject*> proxy(cx, &obj->as<ProxyObject>());
-    proxy->initHandler(handler);
-    proxy->initCrossCompartmentPrivate(priv);
+    new (proxy->data.values) detail::ProxyValueArray;
+    proxy->data.handler = handler;
+    proxy->setCrossCompartmentPrivate(priv);
 
     /* Don't track types of properties of non-DOM and non-singleton proxies. */
     if (newKind != SingletonObject && !clasp->isDOMClass())
-        MarkTypeObjectUnknownProperties(cx, proxy->type());
+        MarkObjectGroupUnknownProperties(cx, proxy->group());
 
     return proxy;
 }
 
-void
-ProxyObject::initCrossCompartmentPrivate(HandleValue priv)
+gc::AllocKind
+ProxyObject::allocKindForTenure() const
 {
-    initCrossCompartmentSlot(PRIVATE_SLOT, priv);
+    gc::AllocKind allocKind = gc::GetGCObjectKind(group()->clasp());
+    if (data.handler->finalizeInBackground(const_cast<ProxyObject*>(this)->private_()))
+        allocKind = GetBackgroundAllocKind(allocKind);
+    return allocKind;
+}
+
+/* static */ size_t
+ProxyObject::objectMovedDuringMinorGC(TenuringTracer* trc, JSObject* dst, JSObject* src)
+{
+    ProxyObject& psrc = src->as<ProxyObject>();
+    ProxyObject& pdst = dst->as<ProxyObject>();
+
+    // We're about to sweep the nursery heap, so migrate the inline
+    // ProxyValueArray to the malloc heap if they were nursery allocated.
+    if (trc->runtime()->gc.nursery.isInside(psrc.data.values))
+        pdst.data.values = js_new<detail::ProxyValueArray>(*psrc.data.values);
+    else
+        trc->runtime()->gc.nursery.removeMallocedBuffer(psrc.data.values);
+    return sizeof(detail::ProxyValueArray);
 }
 
 void
-ProxyObject::initHandler(const BaseProxyHandler *handler)
+ProxyObject::setCrossCompartmentPrivate(const Value& priv)
 {
-    initSlot(HANDLER_SLOT, PrivateValue(const_cast<BaseProxyHandler*>(handler)));
-}
-
-static void
-NukeSlot(ProxyObject *proxy, uint32_t slot)
-{
-    Value old = proxy->getSlot(slot);
-    if (old.isMarkable()) {
-        Zone *zone = ZoneOfValue(old);
-        AutoMarkInDeadZone amd(zone);
-        proxy->setReservedSlot(slot, NullValue());
-    } else {
-        proxy->setReservedSlot(slot, NullValue());
-    }
+    *slotOfPrivate() = priv;
 }
 
 void
-ProxyObject::nuke(const BaseProxyHandler *handler)
+ProxyObject::setSameCompartmentPrivate(const Value& priv)
 {
-    /* Allow people to add their own number of reserved slots beyond the expected 4 */
-    unsigned numSlots = JSCLASS_RESERVED_SLOTS(getClass());
-    for (unsigned i = 0; i < numSlots; i++)
-        NukeSlot(this, i);
+    MOZ_ASSERT(IsObjectValueInCompartment(priv, compartment()));
+    *slotOfPrivate() = priv;
+}
+
+void
+ProxyObject::nuke(const BaseProxyHandler* handler)
+{
+    setSameCompartmentPrivate(NullValue());
+    for (size_t i = 0; i < detail::PROXY_EXTRA_SLOTS; i++)
+        SetProxyExtra(this, i, NullValue());
+
     /* Restore the handler as requested after nuking. */
     setHandler(handler);
+}
+
+JS_FRIEND_API(void)
+js::SetValueInProxy(Value* slot, const Value& value)
+{
+    // Slots in proxies are not GCPtrValues, so do a cast whenever assigning
+    // values to them which might trigger a barrier.
+    *reinterpret_cast<GCPtrValue*>(slot) = value;
 }

@@ -9,38 +9,72 @@
 
 #include "NamespaceImports.h"
 
+#include "vm/Scope.h"
+#include "vm/String.h"
+
 class JSLinearString;
 
 namespace js {
 
-class AutoNameVector;
 class LazyScript;
 class LifoAlloc;
+class ModuleObject;
+class ScriptSourceObject;
 struct SourceCompressionTask;
 
 namespace frontend {
 
-JSScript *
-CompileScript(ExclusiveContext *cx, LifoAlloc *alloc,
-              HandleObject scopeChain, HandleScript evalCaller,
-              const ReadOnlyCompileOptions &options, SourceBufferHolder &srcBuf,
-              JSString *source_ = nullptr, unsigned staticLevel = 0,
-              SourceCompressionTask *extraSct = nullptr);
+JSScript*
+CompileGlobalScript(ExclusiveContext* cx, LifoAlloc& alloc, ScopeKind scopeKind,
+                    const ReadOnlyCompileOptions& options,
+                    SourceBufferHolder& srcBuf,
+                    SourceCompressionTask* extraSct = nullptr,
+                    ScriptSourceObject** sourceObjectOut = nullptr);
 
-bool
-CompileLazyFunction(JSContext *cx, Handle<LazyScript*> lazy, const jschar *chars, size_t length);
+JSScript*
+CompileEvalScript(ExclusiveContext* cx, LifoAlloc& alloc,
+                  HandleObject scopeChain, HandleScope enclosingScope,
+                  const ReadOnlyCompileOptions& options,
+                  SourceBufferHolder& srcBuf,
+                  SourceCompressionTask* extraSct = nullptr,
+                  ScriptSourceObject** sourceObjectOut = nullptr);
 
-bool
-CompileFunctionBody(JSContext *cx, MutableHandleFunction fun,
-                    const ReadOnlyCompileOptions &options,
-                    const AutoNameVector &formals, JS::SourceBufferHolder &srcBuf);
-bool
-CompileStarGeneratorBody(JSContext *cx, MutableHandleFunction fun,
-                         const ReadOnlyCompileOptions &options,
-                         const AutoNameVector &formals, JS::SourceBufferHolder &srcBuf);
+ModuleObject*
+CompileModule(JSContext* cx, const ReadOnlyCompileOptions& options,
+              SourceBufferHolder& srcBuf);
 
-ScriptSourceObject *
-CreateScriptSourceObject(ExclusiveContext *cx, const ReadOnlyCompileOptions &options);
+ModuleObject*
+CompileModule(ExclusiveContext* cx, const ReadOnlyCompileOptions& options,
+              SourceBufferHolder& srcBuf, LifoAlloc& alloc,
+              ScriptSourceObject** sourceObjectOut = nullptr);
+
+MOZ_MUST_USE bool
+CompileLazyFunction(JSContext* cx, Handle<LazyScript*> lazy, const char16_t* chars, size_t length);
+
+MOZ_MUST_USE bool
+CompileFunctionBody(JSContext* cx, MutableHandleFunction fun,
+                    const ReadOnlyCompileOptions& options,
+                    Handle<PropertyNameVector> formals, JS::SourceBufferHolder& srcBuf,
+                    HandleScope enclosingScope);
+
+// As above, but defaults to the global lexical scope as the enclosing scope.
+MOZ_MUST_USE bool
+CompileFunctionBody(JSContext* cx, MutableHandleFunction fun,
+                    const ReadOnlyCompileOptions& options,
+                    Handle<PropertyNameVector> formals, JS::SourceBufferHolder& srcBuf);
+
+MOZ_MUST_USE bool
+CompileStarGeneratorBody(JSContext* cx, MutableHandleFunction fun,
+                         const ReadOnlyCompileOptions& options,
+                         Handle<PropertyNameVector> formals, JS::SourceBufferHolder& srcBuf);
+
+MOZ_MUST_USE bool
+CompileAsyncFunctionBody(JSContext* cx, MutableHandleFunction fun,
+                         const ReadOnlyCompileOptions& options,
+                         Handle<PropertyNameVector> formals, JS::SourceBufferHolder& srcBuf);
+
+ScriptSourceObject*
+CreateScriptSourceObject(ExclusiveContext* cx, const ReadOnlyCompileOptions& options);
 
 /*
  * True if str consists of an IdentifierStart character, followed by one or
@@ -52,15 +86,21 @@ CreateScriptSourceObject(ExclusiveContext *cx, const ReadOnlyCompileOptions &opt
  * Defined in TokenStream.cpp.
  */
 bool
-IsIdentifier(JSLinearString *str);
+IsIdentifier(JSLinearString* str);
+
+/*
+ * As above, but taking chars + length.
+ */
+bool
+IsIdentifier(const char16_t* chars, size_t length);
 
 /* True if str is a keyword. Defined in TokenStream.cpp. */
 bool
-IsKeyword(JSLinearString *str);
+IsKeyword(JSLinearString* str);
 
 /* GC marking. Defined in Parser.cpp. */
 void
-MarkParser(JSTracer *trc, JS::AutoGCRooter *parser);
+MarkParser(JSTracer* trc, JS::AutoGCRooter* parser);
 
 } /* namespace frontend */
 } /* namespace js */

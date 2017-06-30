@@ -10,17 +10,16 @@ dnl ========================================================
 AC_DEFUN([MOZ_IOS_SDK],
 [
 
-MOZ_ARG_WITH_STRING(ios-version,
-[  --with-ios-version=VER
-                      version of the iOS SDK, defaults to 6.0],
-    ios_sdk_version=$withval,
-    ios_sdk_version=8.1)
+MOZ_ARG_WITH_STRING(ios-target,
+[  --with-ios-target=SDK
+                     what target sdk to use, defaults to iPhoneSimulator],
+    ios_target=$withval)
 
 MOZ_ARG_WITH_STRING(ios-min-version,
 [  --with-ios-min-version=VER
-                          deploy target version, defaults to 4.3],
+                          deploy target version, defaults to 6.0],
     ios_deploy_version=$withval,
-    ios_deploy_version=5.1.1)
+    ios_deploy_version=6.0)
 
 MOZ_ARG_WITH_STRING(ios-arch,
 [  --with-ios-arch=ARCH
@@ -82,21 +81,21 @@ iPhoneOS|iPhoneSimulator)
     ios_toolchain="`xcode-select --print-path`/Toolchains/XcodeDefault.xctoolchain/usr/bin"
 
     dnl test to see if the actual sdk exists
-    ios_sdk_root="$xcode_base"/$ios_target.platform/Developer/SDKs/$ios_target"$ios_sdk_version".sdk
+    ios_sdk_root="$xcode_base"/$ios_target.platform/Developer/SDKs/$ios_target.sdk
     if ! test -d "$ios_sdk_root" ; then
         AC_MSG_ERROR([Invalid SDK version])
     fi
 
     dnl set the compilers
-    AS="xcrun -sdk iphoneos as"
-    CC="xcrun -sdk iphoneos clang"
-    CXX="xcrun -sdk iphoneos clang++"
-    CPP="xcrun -sdk iphoneos clang -E"
-    LD="xcrun -sdk iphoneos ld"
-    AR="xcrun -sdk iphoneos ar"
-    RANLIB="xcrun -sdk iphoneos ranlib"
-    STRIP="xcrun -sdk iphoneos strip"
-    LDFLAGS="-isysroot $ios_sdk_root -arch $ios_arch -v"
+    export AS="xcrun -sdk iphoneos as"
+    export CC="xcrun -sdk iphoneos clang"
+    export CXX="xcrun -sdk iphoneos clang++"
+    export CPP="xcrun -sdk iphoneos clang++ -E"
+    export LD="xcrun -sdk iphoneos ld"
+    export AR="xcrun -sdk iphoneos ar"
+    export RANLIB="xcrun -sdk iphoneos ranlib"
+    export STRIP="xcrun -sdk iphoneos strip"
+    export LDFLAGS="-isysroot $ios_sdk_root -arch $ios_arch -v"
 
     if test "$ios_target" == "iPhoneSimulator" ; then
         CFLAGS="-isysroot $ios_sdk_root -arch $ios_arch -mios-simulator-version-min=$ios_deploy_version -I$ios_sdk_root/usr/include -pipe -Wno-implicit-int -Wno-return-type"
@@ -104,7 +103,7 @@ iPhoneOS|iPhoneSimulator)
         CFLAGS="-isysroot $ios_sdk_root -arch $ios_arch -miphoneos-version-min=$ios_deploy_version -I$ios_sdk_root/usr/include -pipe -Wno-implicit-int -Wno-return-type"
     fi
     
-    CXXFLAGS="$CFLAGS"
+    CXXFLAGS="-stdlib=libc++ -std=c++11 $CFLAGS"
     CPPFLAGS="$CFLAGS"
 
     dnl prevent cross compile section from using these flags as host flags
@@ -122,6 +121,6 @@ iPhoneOS|iPhoneSimulator)
     fi
 
     AC_DEFINE(IPHONEOS)
-    CROSS_COMPILE=1
+    export CROSS_COMPILE=1
 esac
 ])

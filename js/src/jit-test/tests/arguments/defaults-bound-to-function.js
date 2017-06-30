@@ -9,9 +9,8 @@ function h(a=b, b=43) {
     return [a, b];
     function b() { return 42; }
 }
-var res = h();
-assertEq(res[0], undefined);
-assertEq(res[1](), 42);
+// TDZ
+assertThrowsInstanceOf(h, ReferenceError);
 function i(b=FAIL) {
     function b() {}
 }
@@ -21,14 +20,24 @@ function j(a=(b=42), b=8) {
     return b;
     function b() { return 43; }
 }
-assertEq(j()(), 43);
+// TDZ
+assertThrowsInstanceOf(j, ReferenceError);
 function k(a=(b=42), b=8) {
     return b;
     function a() { return 43; }
 }
-assertEq(k(), 42);
+// TDZ
+assertThrowsInstanceOf(k, ReferenceError);
 function l(a=8, b=a) {
     return b;
     function a() { return 42; }
 }
 assertEq(l(), 8);
+function m([a, b]=[1, 2], c=a) {
+  function a() { return 42; }
+  assertEq(typeof a, "function");
+  assertEq(a(), 42);
+  assertEq(b, 2);
+  assertEq(c, 1);
+}
+m();

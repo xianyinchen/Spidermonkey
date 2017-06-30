@@ -16,15 +16,17 @@ import traceback
 from mozdevice import DMError
 from mozprocess import ProcessHandler
 
+
 class Device(object):
     connected = False
+    logcat_proc = None
 
     def __init__(self, app_ctx, logdir=None, serial=None, restore=True):
         self.app_ctx = app_ctx
         self.dm = self.app_ctx.dm
         self.restore = restore
         self.serial = serial
-        self.logdir = logdir
+        self.logdir = os.path.abspath(os.path.expanduser(logdir))
         self.added_files = set()
         self.backup_files = set()
 
@@ -35,7 +37,7 @@ class Device(object):
         """
         remote_ini = self.app_ctx.remote_profiles_ini
         if not self.dm.fileExists(remote_ini):
-            raise Exception("Remote file '%s' not found" % remote_ini)
+            raise IOError("Remote file '%s' not found" % remote_ini)
 
         local_ini = tempfile.NamedTemporaryFile()
         self.dm.getFile(remote_ini, local_ini.name)
@@ -46,8 +48,8 @@ class Device(object):
         for section in cfg.sections():
             if cfg.has_option(section, 'Path'):
                 if cfg.has_option(section, 'IsRelative') and cfg.getint(section, 'IsRelative'):
-                    profiles.append(posixpath.join(posixpath.dirname(remote_ini), \
-                                    cfg.get(section, 'Path')))
+                    profiles.append(posixpath.join(posixpath.dirname(remote_ini),
+                                                   cfg.get(section, 'Path')))
                 else:
                     profiles.append(cfg.get(section, 'Path'))
         return profiles
@@ -61,7 +63,9 @@ class Device(object):
         remote_dump_dir = posixpath.join(self.app_ctx.remote_profile, 'minidumps')
         local_dump_dir = tempfile.mkdtemp()
         self.dm.getDirectory(remote_dump_dir, local_dump_dir)
-        self.dm.removeDir(remote_dump_dir)
+        if os.listdir(local_dump_dir):
+            for f in self.dm.listFiles(remote_dump_dir):
+                self.dm.removeFile(posixpath.join(remote_dump_dir, f))
         return local_dump_dir
 
     def setup_profile(self, profile):
@@ -78,7 +82,7 @@ class Device(object):
 
         self.dm.pushDir(profile.profile, self.app_ctx.remote_profile)
 
-        timeout = 5 # seconds
+        timeout = 5  # seconds
         starttime = datetime.datetime.now()
         while datetime.datetime.now() - starttime < datetime.timedelta(seconds=timeout):
             if self.dm.fileExists(self.app_ctx.remote_profiles_ini):
@@ -111,7 +115,9 @@ class Device(object):
             self.app_ctx.setup_profile(profile)
 
     def _get_online_devices(self):
-        return [d[0] for d in self.dm.devices() if d[1] != 'offline' if not d[0].startswith('emulator')]
+        return [d[0] for d in self.dm.devices()
+                if d[1] != 'offline'
+                if not d[0].startswith('emulator')]
 
     def connect(self):
         """
@@ -121,7 +127,15 @@ class Device(object):
         if self.connected:
             return
 
-        serial = self.serial or self._get_online_devices()[0]
+        if self.serial:
+            serial = self.serial
+        else:
+            online_devices = self._get_online_devices()
+            if not online_devices:
+                raise IOError("No devices connected. Ensure the device is on and "
+                              "remote debugging via adb is enabled in the settings.")
+            serial = online_devices[0]
+
         self.dm._deviceSerial = serial
         self.dm.connect()
         self.connected = True
@@ -131,10 +145,22 @@ class Device(object):
             logcat_log = os.path.join(self.logdir, '%s.log' % serial)
             if os.path.isfile(logcat_log):
                 self._rotate_log(logcat_log)
-            logcat_args = [self.app_ctx.adb, '-s', '%s' % serial,
-                           'logcat', '-v', 'time']
-            self.logcat_proc = ProcessHandler(logcat_args, logfile=logcat_log)
-            self.logcat_proc.run()
+            self.logcat_proc = self.start_logcat(serial, logfile=logcat_log)
+
+    def start_logcat(self, serial, logfile=None, stream=None, filterspec=None):
+        logcat_args = [self.app_ctx.adb, '-s', '%s' % serial,
+                       'logcat', '-v', 'time', '-b', 'main', '-b', 'radio']
+        # only log filterspec
+        if filterspec:
+            logcat_args.extend(['-s', filterspec])
+        process_args = {}
+        if logfile:
+            process_args['logfile'] = logfile
+        elif stream:
+            process_args['stream'] = stream
+        proc = ProcessHandler(logcat_args, **process_args)
+        proc.run()
+        return proc
 
     def reboot(self):
         """
@@ -154,37 +180,19 @@ class Device(object):
         # TODO for some reason using dm.shellCheckOutput doesn't work,
         #      while calling adb shell directly does.
         args = [self.app_ctx.adb, '-s', self.dm._deviceSerial,
-                'shell', 'cd /system/bin; chmod 555 busybox;' \
+                'shell', 'cd /system/bin; chmod 555 busybox;'
                 'for x in `./busybox --list`; do ln -s ./busybox $x; done']
         adb = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         adb.wait()
         self.dm._verifyZip()
 
-    def setup_port_forwarding(self, local_port=None, remote_port=2828):
-        """
-        Set up TCP port forwarding to the specified port on the device,
-        using any availble local port (if none specified), and return the local port.
-
-        :param local_port: The local port to forward from, if unspecified a
-                           random port is chosen.
-        :param remote_port: The remote port to forward to, defaults to 2828.
-        :returns: The local_port being forwarded.
-        """
-        if not local_port:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(("",0))
-            local_port = s.getsockname()[1]
-            s.close()
-
-        self.dm.forward('tcp:%d' % int(local_port), 'tcp:%d' % int(remote_port))
-        return local_port
-
     def wait_for_net(self):
         active = False
         time_out = 0
         while not active and time_out < 40:
-            proc = subprocess.Popen([self.app_ctx.adb, 'shell', '/system/bin/netcfg'], stdout=subprocess.PIPE)
-            proc.stdout.readline() # ignore first line
+            proc = subprocess.Popen([self.app_ctx.adb, 'shell', '/system/bin/netcfg'],
+                                    stdout=subprocess.PIPE)
+            proc.stdout.readline()  # ignore first line
             line = proc.stdout.readline()
             while line != "":
                 if (re.search(r'UP\s+[1-9]\d{0,2}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line)):
@@ -238,7 +246,8 @@ class Device(object):
             self.dm.removeFile(added_file)
 
         for backup_file in self.backup_files:
-            if self.dm.fileExists('%s.orig' % backup_file) or self.dm.dirExists('%s.orig' % backup_file):
+            if self.dm.fileExists('%s.orig' % backup_file) or \
+               self.dm.dirExists('%s.orig' % backup_file):
                 self.dm.moveTree('%s.orig' % backup_file, backup_file)
 
         # Perform application specific profile cleanup if necessary
@@ -264,9 +273,8 @@ class Device(object):
             if index == 3:
                 os.remove(destlog)
             else:
-                self._rotate_log(destlog, index+1)
+                self._rotate_log(destlog, index + 1)
         shutil.move(srclog, destlog)
-
 
 
 class ProfileConfigParser(RawConfigParser):
@@ -296,4 +304,3 @@ class ProfileConfigParser(RawConfigParser):
                     key = "=".join((key, str(value).replace('\n', '\n\t')))
                 fp.write("%s\n" % (key))
             fp.write("\n")
-

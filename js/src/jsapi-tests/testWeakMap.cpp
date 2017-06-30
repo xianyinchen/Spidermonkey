@@ -5,11 +5,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "jscompartment.h"
+
 #include "gc/Zone.h"
 
 #include "jsapi-tests/tests.h"
 
-#ifdef JSGC_USE_EXACT_ROOTING
+JSObject* keyDelegate = nullptr;
 
 BEGIN_TEST(testWeakMap_basicOperations)
 {
@@ -33,23 +35,23 @@ BEGIN_TEST(testWeakMap_basicOperations)
     CHECK(r == val);
     CHECK(checkSize(map, 1));
 
-    JS_GC(rt);
+    JS_GC(cx);
 
     CHECK(GetWeakMapEntry(cx, map, key, &r));
     CHECK(r == val);
     CHECK(checkSize(map, 1));
 
     key = nullptr;
-    JS_GC(rt);
+    JS_GC(cx);
 
     CHECK(checkSize(map, 0));
 
     return true;
 }
 
-JSObject *newKey()
+JSObject* newKey()
 {
-    return JS_NewObject(cx, nullptr, JS::NullPtr(), JS::NullPtr());
+    return JS_NewPlainObject(cx);
 }
 
 bool
@@ -68,9 +70,8 @@ END_TEST(testWeakMap_basicOperations)
 
 BEGIN_TEST(testWeakMap_keyDelegates)
 {
-    JS_SetGCParameter(rt, JSGC_MODE, JSGC_MODE_INCREMENTAL);
-    JS_GC(rt);
-
+    JS_SetGCParameter(cx, JSGC_MODE, JSGC_MODE_INCREMENTAL);
+    JS_GC(cx);
     JS::RootedObject map(cx, JS::NewWeakMapObject(cx));
     CHECK(map);
 
@@ -79,17 +80,29 @@ BEGIN_TEST(testWeakMap_keyDelegates)
 
     JS::RootedObject delegate(cx, newDelegate());
     CHECK(delegate);
+    keyDelegate = delegate;
 
-    SetKeyDelegate(key, delegate);
+    JS::RootedObject delegateRoot(cx);
+    {
+        JSAutoCompartment ac(cx, delegate);
+        delegateRoot = JS_NewPlainObject(cx);
+        CHECK(delegateRoot);
+        JS::RootedValue delegateValue(cx, JS::ObjectValue(*delegate));
+        CHECK(JS_DefineProperty(cx, delegateRoot, "delegate", delegateValue, 0));
+    }
+    delegate = nullptr;
 
     /*
      * Perform an incremental GC, introducing an unmarked CCW to force the map
      * zone to finish marking before the delegate zone.
      */
-    CHECK(newCCW(map, delegate));
-    GCDebugSlice(rt, true, 1000000);
+    CHECK(newCCW(map, delegateRoot));
+    js::SliceBudget budget(js::WorkBudget(1000000));
+    cx->gc.startDebugGC(GC_NORMAL, budget);
+    while (JS::IsIncrementalGCInProgress(cx))
+        cx->gc.debugGCSlice(budget);
 #ifdef DEBUG
-    CHECK(map->zone()->lastZoneGroupIndex() < delegate->zone()->lastZoneGroupIndex());
+    CHECK(map->zone()->lastZoneGroupIndex() < delegateRoot->zone()->lastZoneGroupIndex());
 #endif
 
     /* Add our entry to the weakmap. */
@@ -99,78 +112,67 @@ BEGIN_TEST(testWeakMap_keyDelegates)
 
     /* Check the delegate keeps the entry alive even if the key is not reachable. */
     key = nullptr;
-    CHECK(newCCW(map, delegate));
-    GCDebugSlice(rt, true, 100000);
+    CHECK(newCCW(map, delegateRoot));
+    budget = js::SliceBudget(js::WorkBudget(100000));
+    cx->gc.startDebugGC(GC_NORMAL, budget);
+    while (JS::IsIncrementalGCInProgress(cx))
+        cx->gc.debugGCSlice(budget);
     CHECK(checkSize(map, 1));
 
     /*
      * Check that the zones finished marking at the same time, which is
-     * neccessary because of the presence of the delegate and the CCW.
+     * necessary because of the presence of the delegate and the CCW.
      */
 #ifdef DEBUG
-    CHECK(map->zone()->lastZoneGroupIndex() == delegate->zone()->lastZoneGroupIndex());
+    CHECK(map->zone()->lastZoneGroupIndex() == delegateRoot->zone()->lastZoneGroupIndex());
 #endif
 
-    /* Check that when the delegate becomes unreacable the entry is removed. */
-    delegate = nullptr;
-    JS_GC(rt);
+    /* Check that when the delegate becomes unreachable the entry is removed. */
+    delegateRoot = nullptr;
+    keyDelegate = nullptr;
+    JS_GC(cx);
     CHECK(checkSize(map, 0));
 
     return true;
 }
 
-static void SetKeyDelegate(JSObject *key, JSObject *delegate)
+static void DelegateObjectMoved(JSObject* obj, const JSObject* old)
 {
-    JS_SetPrivate(key, delegate);
+    if (!keyDelegate)
+        return;  // Object got moved before we set keyDelegate to point to it.
+
+    MOZ_RELEASE_ASSERT(keyDelegate == old);
+    keyDelegate = obj;
 }
 
-static JSObject *GetKeyDelegate(JSObject *obj)
+static JSObject* GetKeyDelegate(JSObject* obj)
 {
-    return static_cast<JSObject*>(JS_GetPrivate(obj));
+    return keyDelegate;
 }
 
-JSObject *newKey()
+JSObject* newKey()
 {
+    static const js::ClassExtension keyClassExtension = {
+        GetKeyDelegate
+    };
+
     static const js::Class keyClass = {
-        "keyWithDelgate",
+        "keyWithDelegate",
         JSCLASS_HAS_PRIVATE | JSCLASS_HAS_RESERVED_SLOTS(1),
-        JS_PropertyStub,         /* addProperty */
-        JS_DeletePropertyStub,   /* delProperty */
-        JS_PropertyStub,         /* getProperty */
-        JS_StrictPropertyStub,   /* setProperty */
-        JS_EnumerateStub,
-        JS_ResolveStub,
-        JS_ConvertStub,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
+        JS_NULL_CLASS_OPS,
         JS_NULL_CLASS_SPEC,
-        {
-            nullptr,
-            nullptr,
-            nullptr,
-            false,
-            GetKeyDelegate
-        },
+        &keyClassExtension,
         JS_NULL_OBJECT_OPS
     };
 
-    JS::RootedObject key(cx);
-    key = JS_NewObject(cx,
-                       reinterpret_cast<const JSClass *>(&keyClass),
-                       JS::NullPtr(),
-                       JS::NullPtr());
+    JS::RootedObject key(cx, JS_NewObject(cx, Jsvalify(&keyClass)));
     if (!key)
         return nullptr;
-
-    SetKeyDelegate(key, nullptr);
 
     return key;
 }
 
-JSObject *newCCW(JS::HandleObject sourceZone, JS::HandleObject destZone)
+JSObject* newCCW(JS::HandleObject sourceZone, JS::HandleObject destZone)
 {
     /*
      * Now ensure that this zone will be swept first by adding a cross
@@ -180,7 +182,7 @@ JSObject *newCCW(JS::HandleObject sourceZone, JS::HandleObject destZone)
     JS::RootedObject object(cx);
     {
         JSAutoCompartment ac(cx, destZone);
-        object = JS_NewObject(cx, nullptr, JS::NullPtr(), JS::NullPtr());
+        object = JS_NewPlainObject(cx);
         if (!object)
             return nullptr;
     }
@@ -189,41 +191,55 @@ JSObject *newCCW(JS::HandleObject sourceZone, JS::HandleObject destZone)
         if (!JS_WrapObject(cx, &object))
             return nullptr;
     }
+
+    // In order to test the SCC algorithm, we need the wrapper/wrappee to be
+    // tenured.
+    cx->gc.evictNursery();
+
     return object;
 }
 
-JSObject *newDelegate()
+JSObject* newDelegate()
 {
-    static const JSClass delegateClass = {
+    static const js::ClassOps delegateClassOps = {
+        nullptr, /* addProperty */
+        nullptr, /* delProperty */
+        nullptr, /* getProperty */
+        nullptr, /* setProperty */
+        nullptr, /* enumerate */
+        nullptr, /* resolve */
+        nullptr, /* mayResolve */
+        nullptr, /* finalize */
+        nullptr, /* call */
+        nullptr, /* hasInstance */
+        nullptr, /* construct */
+        JS_GlobalObjectTraceHook,
+    };
+
+    static const js::ClassExtension delegateClassExtension = {
+        nullptr,
+        DelegateObjectMoved
+    };
+
+    static const js::Class delegateClass = {
         "delegate",
         JSCLASS_GLOBAL_FLAGS | JSCLASS_HAS_RESERVED_SLOTS(1),
-        JS_PropertyStub,
-        JS_DeletePropertyStub,
-        JS_PropertyStub,
-        JS_StrictPropertyStub,
-        JS_EnumerateStub,
-        JS_ResolveStub,
-        JS_ConvertStub,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        JS_GlobalObjectTraceHook
+        &delegateClassOps,
+        JS_NULL_CLASS_SPEC,
+        &delegateClassExtension,
+        JS_NULL_OBJECT_OPS
     };
 
     /* Create the global object. */
     JS::CompartmentOptions options;
-    options.setVersion(JSVERSION_LATEST);
-    JS::RootedObject global(cx);
-    global = JS_NewGlobalObject(cx, &delegateClass, nullptr, JS::FireOnNewGlobalHook, options);
+    options.behaviors().setVersion(JSVERSION_LATEST);
+
+    JS::RootedObject global(cx, JS_NewGlobalObject(cx, Jsvalify(&delegateClass), nullptr,
+                                                   JS::FireOnNewGlobalHook, options));
+    if (!global)
+        return nullptr;
+
     JS_SetReservedSlot(global, 0, JS::Int32Value(42));
-
-    /*
-     * Ensure the delegate is not in the nursery because for the purpose of this
-     * test we're going to put it in a private slot where it won't get updated.
-     */
-    JS_GC(rt);
-
     return global;
 }
 
@@ -240,5 +256,3 @@ checkSize(JS::HandleObject map, uint32_t expected)
     return true;
 }
 END_TEST(testWeakMap_keyDelegates)
-
-#endif // JSGC_USE_EXACT_ROOTING

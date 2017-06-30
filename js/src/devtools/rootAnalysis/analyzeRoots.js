@@ -6,20 +6,30 @@ loadRelativeToScript('utility.js');
 loadRelativeToScript('annotations.js');
 loadRelativeToScript('CFG.js');
 
-var sourceRoot = (environment['SOURCE'] || '') + '/'
+var sourceRoot = (os.getenv('SOURCE') || '') + '/'
 
+var functionName;
 var functionBodies;
 
 if (typeof scriptArgs[0] != 'string' || typeof scriptArgs[1] != 'string')
-    throw "Usage: analyzeRoots.js <gcFunctions.lst> <gcEdges.txt> <suppressedFunctions.lst> <gcTypes.txt> [start end [tmpfile]]";
+    throw "Usage: analyzeRoots.js [-f function_name] <gcFunctions.lst> <gcEdges.txt> <suppressedFunctions.lst> <gcTypes.txt> <typeInfo.txt> [start end [tmpfile]]";
 
-var gcFunctionsFile = scriptArgs[0];
-var gcEdgesFile = scriptArgs[1];
-var suppressedFunctionsFile = scriptArgs[2];
-var gcTypesFile = scriptArgs[3];
-var batch = (scriptArgs[4]|0) || 1;
-var numBatches = (scriptArgs[5]|0) || 1;
-var tmpfile = scriptArgs[6] || "tmp.txt";
+var theFunctionNameToFind;
+if (scriptArgs[0] == '--function') {
+    theFunctionNameToFind = scriptArgs[1];
+    scriptArgs = scriptArgs.slice(2);
+}
+
+var gcFunctionsFile = scriptArgs[0] || "gcFunctions.lst";
+var gcEdgesFile = scriptArgs[1] || "gcEdges.txt";
+var suppressedFunctionsFile = scriptArgs[2] || "suppressedFunctions.lst";
+var gcTypesFile = scriptArgs[3] || "gcTypes.txt";
+var typeInfoFile = scriptArgs[4] || "typeInfo.txt";
+var batch = (scriptArgs[5]|0) || 1;
+var numBatches = (scriptArgs[6]|0) || 1;
+var tmpfile = scriptArgs[7] || "tmp.txt";
+
+GCSuppressionTypes = loadTypeInfo(typeInfoFile)["Suppress GC"] || [];
 
 var gcFunctions = {};
 var text = snarf("gcFunctions.lst").split("\n");
@@ -59,17 +69,25 @@ for (var line of text) {
 }
 text = null;
 
+function isGCType(type)
+{
+    if (type.Kind == "CSU")
+        return type.Name in gcThings;
+    else if (type.Kind == "Array")
+        return isGCType(type.Type);
+    return false;
+}
+
 function isUnrootedType(type)
 {
-    if (type.Kind == "Pointer") {
-        var target = type.Type;
-        if (target.Kind == "CSU")
-            return target.Name in gcThings;
-        return false;
-    }
-    if (type.Kind == "CSU")
+    if (type.Kind == "Pointer")
+        return isGCType(type.Type);
+    else if (type.Kind == "Array")
+        return isUnrootedType(type.Type);
+    else if (type.Kind == "CSU")
         return type.Name in gcPointers;
-    return false;
+    else
+        return false;
 }
 
 function expressionUsesVariable(exp, variable)
@@ -81,6 +99,21 @@ function expressionUsesVariable(exp, variable)
     for (var childExp of exp.Exp) {
         if (expressionUsesVariable(childExp, variable))
             return true;
+    }
+    return false;
+}
+
+function expressionUsesVariableContents(exp, variable)
+{
+    if (!("Exp" in exp))
+        return false;
+    for (var childExp of exp.Exp) {
+        if (childExp.Kind == 'Drf') {
+            if (expressionUsesVariable(childExp, variable))
+                return true;
+        } else if (expressionUsesVariableContents(childExp, variable)) {
+            return true;
+        }
     }
     return false;
 }
@@ -110,7 +143,7 @@ function isReturningImmobileValue(edge, variable)
 //
 function edgeUsesVariable(edge, variable, body)
 {
-    if (ignoreEdgeUse(edge, variable))
+    if (ignoreEdgeUse(edge, variable, body))
         return 0;
 
     if (variable.Kind == "Return" && body.Index[1] == edge.Index[1] && body.BlockId.Kind == "Function")
@@ -128,7 +161,7 @@ function edgeUsesVariable(edge, variable, body)
         return expressionUsesVariable(edge.Exp[1], variable) ? src : 0;
 
     case "Assume":
-        return expressionUsesVariable(edge.Exp[0], variable) ? src : 0;
+        return expressionUsesVariableContents(edge.Exp[0], variable) ? src : 0;
 
     case "Call":
         if (expressionUsesVariable(edge.Exp[0], variable))
@@ -162,9 +195,9 @@ function expressionIsVariableAddress(exp, variable)
     return exp.Kind == "Var" && sameVariable(exp.Variable, variable);
 }
 
-function edgeTakesVariableAddress(edge, variable)
+function edgeTakesVariableAddress(edge, variable, body)
 {
-    if (ignoreEdgeUse(edge, variable))
+    if (ignoreEdgeUse(edge, variable, body))
         return false;
     if (ignoreEdgeAddressTaken(edge))
         return false;
@@ -186,7 +219,7 @@ function edgeTakesVariableAddress(edge, variable)
 
 function edgeKillsVariable(edge, variable)
 {
-    // Direct assignments kill their lhs.
+    // Direct assignments kill their lhs: var = value
     if (edge.Kind == "Assign") {
         var lhs = edge.Exp[0];
         if (lhs.Kind == "Var" && sameVariable(lhs.Variable, variable))
@@ -250,53 +283,108 @@ function edgeCanGC(edge)
 {
     if (edge.Kind != "Call")
         return false;
+
     var callee = edge.Exp[0];
+
+    while (callee.Kind == "Drf")
+        callee = callee.Exp[0];
+
     if (callee.Kind == "Var") {
         var variable = callee.Variable;
-        assert(variable.Kind == "Func");
-        var callee = mangled(variable.Name[0]);
-        if ((callee in gcFunctions) || ((callee + internalMarker) in gcFunctions))
-            return "'" + variable.Name[0] + "'";
-        return null;
+
+        if (variable.Kind == "Func") {
+            var callee = mangled(variable.Name[0]);
+            if ((callee in gcFunctions) || ((callee + internalMarker) in gcFunctions))
+                return "'" + variable.Name[0] + "'";
+            return null;
+        }
+
+        var varName = variable.Name[0];
+        return indirectCallCannotGC(functionName, varName) ? null : "*" + varName;
     }
-    assert(callee.Kind == "Drf");
-    if (callee.Exp[0].Kind == "Fld") {
-        var field = callee.Exp[0].Field;
+
+    if (callee.Kind == "Fld") {
+        var field = callee.Field;
         var csuName = field.FieldCSU.Type.Name;
         var fullFieldName = csuName + "." + field.Name[0];
         if (fieldCallCannotGC(csuName, fullFieldName))
             return null;
         return (fullFieldName in suppressedFunctions) ? null : fullFieldName;
     }
-    assert(callee.Exp[0].Kind == "Var");
-    var varName = callee.Exp[0].Variable.Name[0];
-    return indirectCallCannotGC(functionName, varName) ? null : "*" + varName;
 }
 
-function variableUsePrecedesGC(suppressed, variable, worklist)
+// Search recursively through predecessors from a variable use, returning
+// whether a GC call is reachable (in the reverse direction; this means that
+// the variable use is reachable from the GC call, and therefore the variable
+// is live after the GC call), along with some additional information. What
+// info we want depends on whether the variable turns out to be live across any
+// GC call. We are looking for both hazards (unrooted variables live across GC
+// calls) and unnecessary roots (rooted variables that have no GC calls in
+// their live ranges.)
+//
+// If not:
+//
+//  - 'minimumUse': the earliest point in each body that uses the variable, for
+//    reporting on unnecessary roots.
+//
+// If so:
+//
+//  - 'why': a path from the GC call to a use of the variable after the GC
+//    call, chained through a 'why' field in the returned edge descriptor
+//
+//  - 'gcInfo': a direct pointer to the GC call edge
+//
+function findGCBeforeVariableUse(start_body, start_point, suppressed, variable)
 {
     // Scan through all edges preceding an unrooted variable use, using an
-    // explicit worklist. A worklist contains an incoming edge together with a
-    // description of where it or one of its successors GC'd (if any).
+    // explicit worklist, looking for a GC call. A worklist contains an
+    // incoming edge together with a description of where it or one of its
+    // successors GC'd (if any).
 
+    var bodies_visited = new Map();
+
+    let worklist = [{body: start_body, ppoint: start_point, preGCLive: false, gcInfo: null, why: null}];
     while (worklist.length) {
+        // Grab an entry off of the worklist, representing a point within the
+        // CFG identified by <body,ppoint>. If this point has a descendant
+        // later in the CFG that can GC, gcInfo will be set to the information
+        // about that GC call.
+
         var entry = worklist.pop();
-        var body = entry.body, ppoint = entry.ppoint;
+        var { body, ppoint, gcInfo, preGCLive } = entry;
 
-        if (body.seen) {
-            if (ppoint in body.seen) {
-                var seenEntry = body.seen[ppoint];
-                if (!entry.gcInfo || seenEntry.gcInfo)
-                    continue;
-            }
-        } else {
-            body.seen = [];
+        // Handle the case where there are multiple ways to reach this point
+        // (traversing backwards).
+        var visited = bodies_visited.get(body);
+        if (!visited)
+            bodies_visited.set(body, visited = new Map());
+        if (visited.has(ppoint)) {
+            var seenEntry = visited.get(ppoint);
+
+            // This point already knows how to GC through some other path, so
+            // we have nothing new to learn. (The other path will consider the
+            // predecessors.)
+            if (seenEntry.gcInfo)
+                continue;
+
+            // If this worklist's entry doesn't know of any way to GC, then
+            // there's no point in continuing the traversal through it. Perhaps
+            // another edge will be found that *can* GC; otherwise, the first
+            // route to the point will traverse through predecessors.
+            //
+            // Note that this means we may visit a point more than once, if the
+            // first time we visit we don't have a known reachable GC call and
+            // the second time we do.
+            if (!gcInfo)
+                continue;
         }
-        body.seen[ppoint] = {body:body, gcInfo:entry.gcInfo};
+        visited.set(ppoint, {body: body, gcInfo: gcInfo});
 
+        // Check for hitting the entry point of the current body (which may be
+        // the outer function or a loop within it.)
         if (ppoint == body.Index[0]) {
             if (body.BlockId.Kind == "Loop") {
-                // propagate to parents that enter the loop body.
+                // Propagate to outer body parents that enter the loop body.
                 if ("BlockPPoint" in body) {
                     for (var parent of body.BlockPPoint) {
                         var found = false;
@@ -304,17 +392,23 @@ function variableUsePrecedesGC(suppressed, variable, worklist)
                             if (sameBlockId(xbody.BlockId, parent.BlockId)) {
                                 assert(!found);
                                 found = true;
-                                worklist.push({body:xbody, ppoint:parent.Index,
-                                               gcInfo:entry.gcInfo, why:entry});
+                                worklist.push({body: xbody, ppoint: parent.Index,
+                                               gcInfo: gcInfo, why: entry});
                             }
                         }
                         assert(found);
                     }
                 }
-            } else if (variable.Kind == "Arg" && entry.gcInfo) {
+            } else if (variable.Kind == "Arg" && gcInfo) {
                 // The scope of arguments starts at the beginning of the
                 // function
-                return {gcInfo:entry.gcInfo, why:entry};
+                return entry;
+            } else if (entry.preGCLive) {
+                // We didn't find a "good" explanation beginning of the live
+                // range, but we do know the variable was live across the GC.
+                // This can happen if the live range started when a variable is
+                // used as a retparam.
+                return entry;
             }
         }
 
@@ -325,44 +419,90 @@ function variableUsePrecedesGC(suppressed, variable, worklist)
         for (var edge of predecessors[ppoint]) {
             var source = edge.Index[0];
 
-            if (edgeKillsVariable(edge, variable)) {
-                if (entry.gcInfo)
-                    return {gcInfo: entry.gcInfo, why: {body:body, ppoint:source, gcInfo:entry.gcInfo, why:entry } }
+            var edge_kills = edgeKillsVariable(edge, variable);
+            var edge_uses = edgeUsesVariable(edge, variable, body);
+
+            if (edge_kills || edge_uses) {
                 if (!body.minimumUse || source < body.minimumUse)
                     body.minimumUse = source;
+            }
+
+            if (edge_kills) {
+                // This is a beginning of the variable's live range. If we can
+                // reach a GC call from here, then we're done -- we have a path
+                // from the beginning of the live range, through the GC call,
+                // to a use after the GC call that proves its live range
+                // extends at least that far.
+                if (gcInfo)
+                    return {body: body, ppoint: source, gcInfo: gcInfo, why: entry };
+
+                // Otherwise, keep searching through the graph, but truncate
+                // this particular branch of the search at this edge.
                 continue;
             }
 
-            var gcInfo = entry.gcInfo;
+            var src_gcInfo = gcInfo;
+            var src_preGCLive = preGCLive;
             if (!gcInfo && !(source in body.suppressed) && !suppressed) {
                 var gcName = edgeCanGC(edge, body);
                 if (gcName)
-                    gcInfo = {name:gcName, body:body, ppoint:source};
+                    src_gcInfo = {name:gcName, body:body, ppoint:source};
             }
 
-            if (edgeUsesVariable(edge, variable, body)) {
-                if (gcInfo)
-                    return {gcInfo:gcInfo, why:entry};
-                if (!body.minimumUse || source < body.minimumUse)
-                    body.minimumUse = source;
+            if (edge_uses) {
+                // The live range starts at least this far back, so we're done
+                // for the same reason as with edge_kills. The only difference
+                // is that a GC on this edge indicates a hazard, whereas if
+                // we're killing a live range in the GC call then it's not live
+                // *across* the call.
+                //
+                // However, we may want to generate a longer usage chain for
+                // the variable than is minimally necessary. For example,
+                // consider:
+                //
+                //   Value v = f();
+                //   if (v.isUndefined())
+                //     return false;
+                //   gc();
+                //   return v;
+                //
+                // The call to .isUndefined() is considered to be a use and
+                // therefore indicates that v must be live at that point. But
+                // it's more helpful to the user to continue the 'why' path to
+                // include the ancestor where the value was generated. So we
+                // will only return here if edge.Kind is Assign; otherwise,
+                // we'll pass a "preGCLive" value up through the worklist to
+                // remember that the variable *is* alive before the GC and so
+                // this function should be returning a true value.
+
+                if (src_gcInfo) {
+                    src_preGCLive = true;
+                    if (edge.Kind == 'Assign')
+                        return {body:body, ppoint:source, gcInfo:src_gcInfo, why:entry};
+                }
             }
 
             if (edge.Kind == "Loop") {
-                // propagate to exit points of the loop body, in addition to the
-                // predecessor of the loop edge itself.
+                // Additionally propagate the search into a loop body, starting
+                // with the exit point.
                 var found = false;
                 for (var xbody of functionBodies) {
                     if (sameBlockId(xbody.BlockId, edge.BlockId)) {
                         assert(!found);
                         found = true;
                         worklist.push({body:xbody, ppoint:xbody.Index[1],
-                                       gcInfo:gcInfo, why:entry});
+                                       preGCLive: src_preGCLive, gcInfo:src_gcInfo,
+                                       why:entry});
                     }
                 }
                 assert(found);
                 break;
             }
-            worklist.push({body:body, ppoint:source, gcInfo:gcInfo, why:entry});
+
+            // Propagate the search to the predecessors of this edge.
+            worklist.push({body:body, ppoint:source,
+                           preGCLive: src_preGCLive, gcInfo:src_gcInfo,
+                           why:entry});
         }
     }
 
@@ -371,27 +511,32 @@ function variableUsePrecedesGC(suppressed, variable, worklist)
 
 function variableLiveAcrossGC(suppressed, variable)
 {
-    // A variable is live across a GC if (1) it is used by an edge, and (2) it
-    // is used after a GC in a successor edge.
+    // A variable is live across a GC if (1) it is used by an edge (as in, it
+    // was at least initialized), and (2) it is used after a GC in a successor
+    // edge.
 
-    for (var body of functionBodies) {
-        body.seen = null;
+    for (var body of functionBodies)
         body.minimumUse = 0;
-    }
 
     for (var body of functionBodies) {
         if (!("PEdge" in body))
             continue;
         for (var edge of body.PEdge) {
             var usePoint = edgeUsesVariable(edge, variable, body);
+            // Example for !edgeKillsVariable:
+            //
+            //   JSObject* obj = NewObject();
+            //   cangc();
+            //   obj = NewObject();    <-- uses 'obj', but kills previous value
+            //
             if (usePoint && !edgeKillsVariable(edge, variable)) {
                 // Found a use, possibly after a GC.
-                var worklist = [{body:body, ppoint:usePoint, gcInfo:null, why:null}];
-                var call = variableUsePrecedesGC(suppressed, variable, worklist);
-                if (call) {
-                    call.afterGCUse = usePoint;
-                    return call;
-                }
+                var call = findGCBeforeVariableUse(body, usePoint, suppressed, variable);
+                if (!call)
+                    continue;
+
+                call.afterGCUse = usePoint;
+                return call;
             }
         }
     }
@@ -410,7 +555,7 @@ function unsafeVariableAddressTaken(suppressed, variable)
         if (!("PEdge" in body))
             continue;
         for (var edge of body.PEdge) {
-            if (edgeTakesVariableAddress(edge, variable)) {
+            if (edgeTakesVariableAddress(edge, variable, body)) {
                 if (edge.Kind == "Assign" || (!suppressed && edgeCanGC(edge)))
                     return {body:body, ppoint:edge.Index[0]};
             }
@@ -419,9 +564,11 @@ function unsafeVariableAddressTaken(suppressed, variable)
     return null;
 }
 
-function computePrintedLines(functionName)
+// Read out the brief (non-JSON, semi-human-readable) CFG description for the
+// given function and store it.
+function loadPrintedLines(functionName)
 {
-    assert(!system("xdbfind src_body.xdb '" + functionName + "' > " + tmpfile));
+    assert(!os.system("xdbfind src_body.xdb '" + functionName + "' > " + tmpfile));
     var lines = snarf(tmpfile).split('\n');
 
     for (var body of functionBodies)
@@ -454,13 +601,21 @@ function computePrintedLines(functionName)
     }
 }
 
-function findLocation(body, ppoint)
+function findLocation(body, ppoint, opts={brief: false})
 {
     var location = body.PPoint[ppoint - 1].Location;
-    var text = location.CacheString + ":" + location.Line;
-    if (text.indexOf(sourceRoot) == 0)
-        return text.substring(sourceRoot.length);
-    return text;
+    var file = location.CacheString;
+
+    if (file.indexOf(sourceRoot) == 0)
+        file = file.substring(sourceRoot.length);
+
+    if (opts.brief) {
+        var m = /.*\/(.*)/.exec(file);
+        if (m)
+            file = m[1];
+    }
+
+    return file + ":" + location.Line;
 }
 
 function locationLine(text)
@@ -475,11 +630,11 @@ function printEntryTrace(functionName, entry)
     var gcPoint = entry.gcInfo ? entry.gcInfo.ppoint : 0;
 
     if (!functionBodies[0].lines)
-        computePrintedLines(functionName);
+        loadPrintedLines(functionName);
 
     while (entry) {
         var ppoint = entry.ppoint;
-        var lineText = findLocation(entry.body, ppoint);
+        var lineText = findLocation(entry.body, ppoint, {"brief": true});
 
         var edgeText = "";
         if (entry.why && entry.why.body == entry.body) {
@@ -490,8 +645,8 @@ function printEntryTrace(functionName, entry)
                 var table = {};
                 entry.body.edgeTable = table;
                 for (var line of entry.body.lines) {
-                    if (match = /\((\d+),(\d+),/.exec(line))
-                        table[match[1] + "," + match[2]] = line; // May be multiple?
+                    if (match = /\((\d+,\d+),/.exec(line))
+                        table[match[1]] = line; // May be multiple?
                 }
             }
 
@@ -577,7 +732,7 @@ function processBodies(functionName)
                       " of type '" + typeDesc(variable.Type) + "'" +
                       " live across GC call " + result.gcInfo.name +
                       " at " + lineText);
-                printEntryTrace(functionName, result.why);
+                printEntryTrace(functionName, result);
             }
             result = unsafeVariableAddressTaken(suppressed, variable.Variable);
             if (result) {
@@ -601,16 +756,30 @@ var minStream = xdb.min_data_stream()|0;
 var maxStream = xdb.max_data_stream()|0;
 
 var N = (maxStream - minStream) + 1;
-var each = Math.floor(N/numBatches);
-var start = minStream + each * (batch - 1);
-var end = Math.min(minStream + each * batch - 1, maxStream);
+var start = Math.floor((batch - 1) / numBatches * N) + minStream;
+var start_next = Math.floor(batch / numBatches * N) + minStream;
+var end = start_next - 1;
 
-// For debugging: Set this variable to the function name you're interested in
-// debugging and run once. That will print out the nameIndex of that function.
-// Insert that into the following statement to go directly to just that
-// function. Add your debugging printouts or debugger; statements or whatever.
-var theFunctionNameToFind;
-// var start = end = 12345;
+function process(name, json) {
+    functionName = name;
+    functionBodies = JSON.parse(json);
+
+    for (var body of functionBodies)
+        body.suppressed = [];
+    for (var body of functionBodies) {
+        for (var [pbody, id] of allRAIIGuardedCallPoints(functionBodies, body, isSuppressConstructor))
+            pbody.suppressed[id] = true;
+    }
+    processBodies(functionName);
+}
+
+if (theFunctionNameToFind) {
+    var data = xdb.read_entry(theFunctionNameToFind);
+    var json = data.readString();
+    process(theFunctionNameToFind, json);
+    xdb.free_string(data);
+    quit(0);
+}
 
 for (var nameIndex = start; nameIndex <= end; nameIndex++) {
     var name = xdb.read_key(nameIndex);
@@ -618,23 +787,11 @@ for (var nameIndex = start; nameIndex <= end; nameIndex++) {
     var data = xdb.read_entry(name);
     xdb.free_string(name);
     var json = data.readString();
+    try {
+        process(functionName, json);
+    } catch (e) {
+        printErr("Exception caught while handling " + functionName);
+        throw(e);
+    }
     xdb.free_string(data);
-    functionBodies = JSON.parse(json);
-
-    if (theFunctionNameToFind) {
-        if (functionName == theFunctionNameToFind) {
-            printErr("nameIndex = " + nameIndex);
-            quit(1);
-        } else {
-            continue;
-        }
-    }
-
-    for (var body of functionBodies)
-        body.suppressed = [];
-    for (var body of functionBodies) {
-        for (var [pbody, id] of allRAIIGuardedCallPoints(body, isSuppressConstructor))
-            pbody.suppressed[id] = true;
-    }
-    processBodies(functionName);
 }
