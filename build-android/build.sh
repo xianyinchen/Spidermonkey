@@ -59,7 +59,7 @@ python ../configure.py \
             --enable-project=js \
             --with-android-ndk=$NDK_ROOT \
             --with-android-sdk=$HOME/bin/android-sdk \
-            --with-android-version=10 \
+            --with-android-version=${ANDROID_VERSION} \
             --with-android-gnu-compiler-version=${GCC_VERSION} \
             --with-arch=${CPU_ARCH} \
             --with-android-cxx-stl=libstdc++ \
@@ -68,11 +68,10 @@ python ../configure.py \
             --disable-tests \
             --enable-strip \
             --enable-install-strip \
-            --enable-optimize=-O3 \
             --disable-debug \
-            --with-thumb=no \
             --with-system-zlib \
-            --without-intl-api
+            --without-intl-api \
+            ${EXTRA_ARGS}
 
 
 make -j8
@@ -110,6 +109,8 @@ CPU_ARCH=armv6
 RELEASE_ARCH_DIR=armeabi
 GCC_VERSION=4.9
 TOOLNAME_PREFIX=arm-linux-androideabi
+ANDROID_VERSION=9
+EXTRA_ARGS=--disable-jemalloc
 build_with_arch
 
 # Build with armv7
@@ -119,6 +120,8 @@ CPU_ARCH=armv7-a
 RELEASE_ARCH_DIR=armeabi-v7a
 GCC_VERSION=4.9
 TOOLNAME_PREFIX=arm-linux-androideabi
+ANDROID_VERSION=9
+EXTRA_ARGS=--disable-jemalloc
 build_with_arch
 
 # Build with arm64
@@ -128,8 +131,9 @@ CPU_ARCH=armv8-a
 RELEASE_ARCH_DIR=arm64-v8a
 GCC_VERSION=4.9
 TOOLNAME_PREFIX=aarch64-linux-android
+ANDROID_VERSION=21
+EXTRA_ARGS=--disable-jemalloc
 build_with_arch
-
 
 # Build with x86
 TOOLS_ARCH=x86
@@ -138,4 +142,6 @@ CPU_ARCH=i686
 RELEASE_ARCH_DIR=x86
 GCC_VERSION=4.9
 TOOLNAME_PREFIX=i686-linux-android
+ANDROID_VERSION=9
+EXTRA_ARGS=--disable-jemalloc
 build_with_arch
