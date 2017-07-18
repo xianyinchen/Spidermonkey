@@ -857,8 +857,8 @@ ContextToPC(EMULATOR_CONTEXT* context)
                   "stored IP should be compile-time pointer-sized");
     return reinterpret_cast<uint8_t**>(&context->thread.__rip);
 # elif defined(JS_CPU_X86)
-    static_assert(sizeof(context->thread.uts.ts32.__eip) == sizeof(void*),
-                  "stored IP should be compile-time pointer-sized");
+    // static_assert(sizeof(context->thread.uts.ts32.__eip) == sizeof(void*),
+    //               "stored IP should be compile-time pointer-sized");
     return reinterpret_cast<uint8_t**>(&context->thread.uts.ts32.__eip);
 # elif defined(JS_CPU_ARM)
     static_assert(sizeof(context->thread.__pc) == sizeof(void*),

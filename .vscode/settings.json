@@ -1,0 +1,17 @@
+{
+    "files.associations": {
+        "__config": "cpp",
+        "uchar.c": "cpp",
+        "concur.c": "cpp",
+        "thread": "cpp",
+        "os2thred.c": "cpp",
+        "uxproces.c": "cpp",
+        "ntio.c": "cpp",
+        "prtpool.c": "cpp",
+        "cltsrv.c": "cpp",
+        "cvar2.c": "cpp",
+        "provider.c": "cpp",
+        "ranfile.c": "cpp",
+        "switch.c": "cpp"
+    }
+}

@@ -16,9 +16,12 @@ export OLD_CONFIGURE=../js/src/old-configure
 # # remove everything but the static library and this script
 ls | grep -v build.sh | xargs rm -rf
 
-# #
-# # create i386 version (simulator)
-# #
+mkdir dist
+mkdir dist/temp
+
+#
+# create i386 version (simulator)
+#
 python ../configure.py \
             --enable-project=js \
             --with-toolchain-prefix="`xcode-select --print-path`/Toolchains/XcodeDefault.xctoolchain/usr/bin/" \
@@ -112,6 +115,13 @@ fi
 mv ./mozglue/build/libmozglue.a ./dist/temp/libmozglue.arm64.a
 mv ./js/src/libjs_static.a ./dist/temp/libjs_static.arm64.a
 
+# mv ./mozglue/build/libmozglue.a ./dist/libmozglue.a
+# mv ./js/src/libjs_static.a ./dist/libjs_static.a
+# $LIPO -info dist/libjs_static.a
+# $LIPO -info dist/libmozglue.a
+# mkdir dist/spidermonkey
+# cp -RL dist/include/* dist/spidermonkey
+
 # #
 # # lipo create
 # #
@@ -125,6 +135,9 @@ if [ -e dist/temp/libjs_static.i386.a ] && [ -e dist/temp/libjs_static.x86_64.a 
     $STRIP -S dist/sdk/libmozglue.a
     $LIPO -info dist/sdk/libjs_static.a
     $LIPO -info dist/sdk/libmozglue.a
+    mkdir dist/spidermonkey
+    cp -RL dist/include/* dist/spidermonkey
+    rm -r dist/temp
 fi
 
 #
