@@ -341,6 +341,8 @@ AtomicOperations::isLockfree(int32_t size)
 #  include "jit/none/AtomicOperations-ppc.h"
 # elif defined(__aarch64__)
 #  include "jit/arm64/AtomicOperations-arm64.h"
+# elif defined(__x86_64__) || defined(__i386__)
+#  include "jit/x86-shared/AtomicOperations-x86-shared.h"
 # else
 #  include "jit/none/AtomicOperations-none.h" // These MOZ_CRASH() always
 # endif
