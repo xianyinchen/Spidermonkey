@@ -339,6 +339,8 @@ AtomicOperations::isLockfree(int32_t size)
   // top of the file for more guidance.
 # if defined(__ppc64__) || defined(__PPC64__) || defined(__ppc64le__) || defined(__PPC64LE__)
 #  include "jit/none/AtomicOperations-ppc.h"
+# elif defined(__arm__)
+#  include "jit/arm/AtomicOperations-arm.h"
 # elif defined(__aarch64__)
 #  include "jit/arm64/AtomicOperations-arm64.h"
 # elif defined(__x86_64__) || defined(__i386__)

@@ -9,7 +9,9 @@
 #ifndef jit_arm_AtomicOperations_arm_h
 #define jit_arm_AtomicOperations_arm_h
 
+#if defined(JS_CODEGEN_ARM)
 #include "jit/arm/Architecture-arm.h"
+#endif
 
 #if defined(__clang__) || defined(__GNUC__)
 
@@ -42,7 +44,11 @@ js::jit::AtomicOperations::isLockfree8()
     MOZ_ASSERT(__atomic_always_lock_free(sizeof(int8_t), 0));
     MOZ_ASSERT(__atomic_always_lock_free(sizeof(int16_t), 0));
     MOZ_ASSERT(__atomic_always_lock_free(sizeof(int32_t), 0));
+#  if defined(JS_CODEGEN_ARM)
     return HasLDSTREXBHD() && __atomic_always_lock_free(sizeof(int64_t), 0);
+#  else
+    return __atomic_always_lock_free(sizeof(int64_t), 0);
+#  endif
 # else
     return false;
 # endif
