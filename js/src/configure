@@ -34,8 +34,6 @@
 
 
 
-
-
     
 
 
@@ -6390,9 +6388,12 @@ fi # COMPILE_ENVIRONMENT
 
 if test "$OS_TARGET" = "Android" -a -z "$gonkdir"; then
     case "${CPU_ARCH}-${MOZ_ARCH}" in
-    arm-armv7*)
+    arm64-armv7*)
         ANDROID_CPU_ARCH=armeabi-v7a
         ;;
+    aarch64-armv8*)
+        ANDROID_CPU_ARCH=arm64-v8a
+        ;;        
     arm-*)
         ANDROID_CPU_ARCH=armeabi
         ;;
