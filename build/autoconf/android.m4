@@ -125,7 +125,7 @@ case "$target" in
         ;;
     esac
 
-    android_platform="$android_ndk"/platforms/android-"$android_version"/arch-"$target_name"
+    android_platform="$android_ndk"/platforms/android-"$android_version"/arch-arm64
 
     if test -d "$android_platform" ; then
         AC_MSG_RESULT([$android_platform])

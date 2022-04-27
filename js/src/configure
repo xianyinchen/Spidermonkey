@@ -36,8 +36,6 @@
 
 
 
-
-
     
 
 
@@ -1264,7 +1262,6 @@ done
 esac
 fi
 
-
 COMPILE_ENVIRONMENT=1
 # Check whether --enable-compile-environment or --disable-compile-environment was given.
 if test "${enable_compile_environment+set}" = set; then
@@ -1666,8 +1663,11 @@ fi
 
 case "$target" in
 arm-linux*-android*|*-linuxandroid*)
-    android_tool_prefix="arm-linux-androideabi"
+    android_tool_prefix="arm-linux-android"
     ;;
+aarch64-linux*-android*|*-linuxandroid*)
+    android_tool_prefix="aarch64-linux-android"
+    ;;    
 i?86-*android*)
     android_tool_prefix="i686-linux-android"
     ;;
@@ -1753,7 +1753,7 @@ echo "configure:1743: checking for android platform directory" >&5
         ;;
     esac
 
-    android_platform="$android_ndk"/platforms/android-"$android_version"/arch-"$target_name"
+    android_platform="$android_ndk"/platforms/android-"$android_version"/arch-arm64
 
     if test -d "$android_platform" ; then
         echo "$ac_t""$android_platform" 1>&6
@@ -2874,7 +2874,7 @@ if test $ac_prog_rejected = yes; then
     shift
     set dummy "$ac_dir/$ac_word" "$@"
     shift
-    ac_cv_prog_CC="$@"
+    ac_cv_prog_CC="$@"    
   fi
 fi
 fi
